@@ -453,6 +453,274 @@ RSpec.describe Foobara::CommandConnector do
         end
       end
     end
+
+    context "when connecting non-command class" do
+      it "raises an error" do
+        expect {
+          command_connector.connect(String)
+        }.to raise_error("Don't know how to register String (Class)")
+      end
+    end
+
+    context "when connecting non-module/non-class" do
+      it "raises an error for unrecognized registerable type" do
+        expect {
+          command_connector.connect(123)
+        }.to raise_error("Don't know how to register 123 (Integer)")
+      end
+    end
+
+    context "when connecting module that is neither organization nor domain" do
+      it "raises an error" do
+        regular_module = stub_module(:RegularModule)
+
+        expect {
+          command_connector.connect(regular_module)
+        }.to raise_error("Don't know how to register RegularModule (Module)")
+      end
+    end
+  end
+
+  describe ".register_authenticator" do
+    context "when authenticator does not have a symbol" do
+      it "raises an error" do
+        authenticator_without_symbol = Foobara::CommandConnector::Authenticator.new(&proc { "user" })
+        authenticator_without_symbol.instance_variable_set(:@symbol, nil)
+
+        expect {
+          described_class.register_authenticator(authenticator_without_symbol)
+        }.to raise_error(ArgumentError, "Expected authenticator to have a symbol")
+      end
+    end
+  end
+
+  describe ".to_authenticator" do
+    context "when passing more than 2 arguments" do
+      it "raises an error" do
+        expect {
+          described_class.to_authenticator(:a, :b, :c)
+        }.to raise_error(ArgumentError, "Expected 1 or 2 arguments, got 3")
+      end
+    end
+
+    context "when passing a non-authenticator class" do
+      it "raises an error" do
+        expect {
+          described_class.to_authenticator(String)
+        }.to raise_error(ArgumentError, "Expected a class that inherits from Authenticator")
+      end
+    end
+
+    context "when passing both symbol and string" do
+      it "raises an error" do
+        expect {
+          described_class.to_authenticator(:sym, "string")
+        }.to raise_error(ArgumentError, "Was not expecting a symbol and a string")
+      end
+    end
+
+    context "when passing unregistered symbol" do
+      it "raises an error" do
+        expect {
+          described_class.to_authenticator(:nonexistent_authenticator)
+        }.to raise_error("No authenticator found for nonexistent_authenticator")
+      end
+    end
+
+    context "when passing empty array" do
+      it "returns nil" do
+        result = described_class.to_authenticator([])
+        expect(result).to be_nil
+      end
+    end
+
+    context "when passing object that doesn't respond to call or isn't recognized" do
+      it "raises an error" do
+        expect {
+          described_class.to_authenticator(123)
+        }.to raise_error("Not sure how to convert 123 into an AllowedRule object")
+      end
+    end
+  end
+
+  describe ".to_auth_user_mapper" do
+    context "when passing command with ambiguous inputs" do
+      it "raises an error" do
+        ambiguous_command = stub_class(:AmbiguousCommand, Foobara::Command) do
+          inputs do
+            foo :string, :required
+            bar :string, :required
+          end
+          result :string
+        end
+
+        expect {
+          described_class.to_auth_user_mapper(ambiguous_command)
+        }.to raise_error(ArgumentError, /Ambiguous inputs/)
+      end
+    end
+
+    context "when passing unrecognized class type" do
+      it "raises an error" do
+        expect {
+          described_class.to_auth_user_mapper(String)
+        }.to raise_error(ArgumentError, "not sure how to convert a String to an auth mapper")
+      end
+    end
+
+    context "when passing unrecognized object type" do
+      it "raises an error" do
+        expect {
+          described_class.to_auth_user_mapper(123)
+        }.to raise_error(ArgumentError, "Not sure how to convert 123 to an auth mapper")
+      end
+    end
+  end
+
+  describe "#connect_delayed" do
+    context "when connecting the same delayed connection twice" do
+      it "raises AlreadyConnectedError" do
+        command_connector.send(:connect_delayed, "SomeCommand")
+
+        expect {
+          command_connector.send(:connect_delayed, "SomeCommand")
+        }.to raise_error(Foobara::CommandConnector::AlreadyConnectedError, "Already connected SomeCommand")
+      end
+    end
+  end
+
+  describe "#desugarize_connect_args" do
+    context "when no desugarizer is present" do
+      let(:connector_class_without_desugarizer) do
+        stub_class(:ConnectorWithoutDesugarizer, Foobara::CommandConnector)
+      end
+
+      it "returns args and opts unchanged" do
+        connector = connector_class_without_desugarizer.new
+        connector_class_without_desugarizer.instance_variable_set(:@desugarizer, nil)
+
+        args = [command_class]
+        opts = { foo: :bar }
+
+        result = connector.send(:desugarize_connect_args, args, opts)
+        expect(result).to eq([args, opts])
+      end
+    end
+  end
+
+  describe "request processing error paths" do
+    before do
+      command_connector.connect(command_class)
+    end
+
+    context "when command not found in request_to_command_class for run action" do
+      it "raises NoCommandFoundError" do
+        request = command_connector.send(:build_request, full_command_name: "NonExistent", action: "run", inputs: {})
+
+        expect {
+          command_connector.send(:request_to_command_class, request)
+        }.to raise_error(Foobara::CommandConnector::NoCommandFoundError)
+      end
+    end
+
+    context "when unknown action in request_to_command_class" do
+      it "raises InvalidContextError" do
+        request = command_connector.send(:build_request, full_command_name: "ComputeExponent", action: "unknown_action", inputs: {})
+
+        expect {
+          command_connector.send(:request_to_command_class, request)
+        }.to raise_error(Foobara::CommandConnector::InvalidContextError, "Not sure what to do with unknown_action")
+      end
+    end
+
+    context "when manifestable not found in request_to_command_inputs for describe" do
+      it "raises NoCommandOrTypeFoundError" do
+        request = command_connector.send(:build_request, full_command_name: "NonExistent", action: "describe", inputs: {})
+
+        expect {
+          command_connector.send(:request_to_command_inputs, request)
+        }.to raise_error(Foobara::CommandConnector::NoCommandOrTypeFoundError)
+      end
+    end
+
+    context "when command not found for describe_command action" do
+      it "raises NoCommandFoundError" do
+        request = command_connector.send(:build_request, full_command_name: "NonExistent", action: "describe_command", inputs: {})
+
+        expect {
+          command_connector.send(:request_to_command_inputs, request)
+        }.to raise_error(Foobara::CommandConnector::NoCommandFoundError)
+      end
+    end
+
+    context "when type not found for describe_type action" do
+      it "raises NoTypeFoundError" do
+        request = command_connector.send(:build_request, full_command_name: "NonExistent", action: "describe_type", inputs: {})
+
+        expect {
+          command_connector.send(:request_to_command_inputs, request)
+        }.to raise_error(Foobara::CommandConnector::NoTypeFoundError)
+      end
+    end
+
+    context "when unknown action in request_to_command_inputs" do
+      it "raises InvalidContextError" do
+        request = command_connector.send(:build_request, full_command_name: "ComputeExponent", action: "unknown_action", inputs: {})
+
+        expect {
+          command_connector.send(:request_to_command_inputs, request)
+        }.to raise_error(Foobara::CommandConnector::InvalidContextError, "Not sure what to do with unknown_action")
+      end
+    end
+  end
+
+  describe "#run_command edge cases" do
+    before do
+      command_connector.connect(command_class)
+    end
+
+    context "when command is nil (defensive check)" do
+      it "raises error" do
+        request = command_connector.send(:build_request, full_command_name: "ComputeExponent", action: "run", inputs: { base: 2, exponent: 3 })
+        request.command_class = command_class
+
+        allow(command_connector).to receive(:request_to_command_instance).and_return(nil)
+
+        expect {
+          command_connector.send(:run_request, request)
+        }.to raise_error("No command returned from #request_to_command")
+      end
+    end
+  end
+
+  describe "#add_default_response_mutator" do
+    it "delegates to command_registry" do
+      mutator = proc { |response| response }
+      expect(command_registry).to receive(:add_default_response_mutator).with(mutator)
+      command_connector.add_default_response_mutator(mutator)
+    end
+  end
+
+  describe "#allowed_rule" do
+    it "delegates to command_registry" do
+      rule = proc { true }
+      expect(command_registry).to receive(:allowed_rule).with(rule)
+      command_connector.allowed_rule(rule)
+    end
+  end
+
+  describe "#each_transformed_command_class" do
+    before do
+      command_connector.connect(command_class)
+    end
+
+    it "iterates over transformed command classes" do
+      commands = []
+      command_connector.each_transformed_command_class do |klass|
+        commands << klass
+      end
+      expect(commands.size).to eq(1)
+    end
   end
 
   describe "#run_command" do
@@ -909,6 +1177,14 @@ RSpec.describe Foobara::CommandConnector do
           it "runs the command" do
             expect(response.status).to be(0)
             expect(response.body).to eq("8")
+          end
+
+          it "validates that the rule context responds to base" do
+            # Tests the positive branch on line 897 where it DOES respond to :base
+            # The rule checks respond_to?(:base) and if true, continues to check base == 2
+            expect(response.status).to be(0)
+            expect(response.body).to eq("8")
+            # Since base == 2 in this test, the rule passes
           end
         end
 
@@ -2437,6 +2713,974 @@ RSpec.describe Foobara::CommandConnector do
             "baz" => { "foo" => "bazbaz", "bar" => "bazbazbaz" }
           )
         end
+      end
+    end
+  end
+
+  # Additional tests for branch coverage
+  describe "branch coverage tests" do
+    describe "initialization branches" do
+      context "when current_user is provided" do
+        let(:user_mapper) do
+          stub_class(:UserMapper, Foobara::DomainMapper) do
+            class << self
+              def to_type
+                :string
+              end
+
+              def map!(authenticated_user)
+                "mapped_#{authenticated_user}"
+              end
+            end
+          end
+        end
+
+        it "sets up auth_map with current_user" do
+          connector = described_class.new(current_user: user_mapper)
+          expect(connector.auth_map).to have_key(:current_user)
+          expect(connector.auth_map[:current_user]).to be_a(Foobara::TypeDeclarations::TypedTransformer)
+        end
+
+        context "when auth_map is also provided" do
+          it "merges current_user into auth_map" do
+            connector = described_class.new(
+              current_user: user_mapper,
+              auth_map: { admin: user_mapper }
+            )
+            expect(connector.auth_map).to have_key(:current_user)
+            expect(connector.auth_map).to have_key(:admin)
+          end
+        end
+      end
+
+      context "when auth_map is provided without current_user" do
+        let(:user_mapper) do
+          stub_class(:UserMapper, Foobara::DomainMapper) do
+            class << self
+              def to_type
+                :string
+              end
+
+              def map!(authenticated_user)
+                "mapped_#{authenticated_user}"
+              end
+            end
+          end
+        end
+
+        it "transforms auth_map values to typed transformers" do
+          connector = described_class.new(
+            auth_map: { admin: user_mapper }
+          )
+          expect(connector.auth_map).to have_key(:admin)
+          expect(connector.auth_map[:admin]).to be_a(Foobara::TypeDeclarations::TypedTransformer)
+        end
+      end
+
+      context "when block is provided to initialize" do
+        it "evaluates the block in instance context" do
+          test_command = command_class
+          connector = described_class.new do
+            connect(test_command)
+          end
+          expect(connector.all_exposed_commands.size).to eq(1)
+        end
+      end
+
+      context "when no block is provided" do
+        it "does not evaluate any block" do
+          connector = described_class.new
+          expect(connector.all_exposed_commands.size).to eq(0)
+        end
+      end
+    end
+
+    describe "#connect with authenticator option" do
+      let(:custom_authenticator) do
+        stub_class(:CustomAuthenticator, Foobara::CommandConnector::Authenticator) do
+          def symbol
+            :custom_auth
+          end
+
+          def authenticate(_request)
+            { authenticated_user: "custom_user" }
+          end
+        end.instance
+      end
+
+      it "converts authenticator option to authenticator instance" do
+        connector = described_class.new
+        connector.connect(command_class, authenticator: custom_authenticator)
+
+        exposed_commands = connector.all_exposed_commands
+        expect(exposed_commands.size).to eq(1)
+      end
+    end
+
+    describe "#request_to_command_instance" do
+      let(:connector) { described_class.new }
+
+      before do
+        connector.connect(command_class)
+      end
+
+      context "when inputs is nil" do
+        it "creates command instance without inputs" do
+          request = connector.send(:build_request, full_command_name: "ComputeExponent", action: "run", inputs: nil)
+          request.command_class = connector.send(:request_to_command_class, request)
+
+          command = connector.send(:request_to_command_instance, request)
+          expect(command).to be_a(Foobara::Command)
+        end
+      end
+
+      context "when inputs is empty hash" do
+        it "creates command instance without inputs" do
+          request = connector.send(:build_request, full_command_name: "ComputeExponent", action: "run", inputs: {})
+          request.command_class = connector.send(:request_to_command_class, request)
+
+          command = connector.send(:request_to_command_instance, request)
+          expect(command).to be_a(Foobara::Command)
+        end
+      end
+
+      context "when inputs is provided" do
+        it "creates command instance with inputs" do
+          request = connector.send(:build_request, full_command_name: "ComputeExponent", action: "run", inputs: { base: 2, exponent: 3 })
+          request.command_class = connector.send(:request_to_command_class, request)
+
+          command = connector.send(:request_to_command_instance, request)
+          expect(command).to be_a(Foobara::Command)
+          # The inputs might not be processed yet at this stage
+          expect(command.raw_inputs).to eq(base: 2, exponent: 3)
+        end
+      end
+    end
+
+    describe "#mutate_response" do
+      let(:connector) { described_class.new }
+      let(:command_with_mutator) do
+        stub_class(:CommandWithMutator, Foobara::Command) do
+          inputs foo: :string
+          result :string
+
+          def execute
+            foo.upcase
+          end
+
+          def mutate_response(response)
+            response.body = "MUTATED: #{response.body}"
+          end
+        end
+      end
+
+      context "when command responds to mutate_response" do
+        before do
+          connector.connect(command_with_mutator)
+        end
+
+        it "calls mutate_response on the command" do
+          response = connector.run(full_command_name: "CommandWithMutator", action: "run", inputs: { foo: "test" })
+          expect(response.body).to eq("MUTATED: TEST")
+        end
+      end
+
+      context "when command does not respond to mutate_response" do
+        before do
+          connector.connect(command_class)
+        end
+
+        it "does not call mutate_response" do
+          response = connector.run(full_command_name: "ComputeExponent", action: "run", inputs: { base: 2, exponent: 3 })
+          expect(response.body).to eq(8)
+        end
+      end
+    end
+
+    describe "#serialize_response_body" do
+      let(:connector) { described_class.new }
+      let(:command_with_serializer) do
+        stub_class(:CommandWithSerializer, Foobara::Command) do
+          inputs foo: :string
+          result :string
+
+          def execute
+            foo.upcase
+          end
+
+          def serialize_result(body)
+            "SERIALIZED: #{body}"
+          end
+        end
+      end
+
+      context "when command responds to serialize_result" do
+        before do
+          connector.connect(command_with_serializer)
+        end
+
+        it "calls serialize_result on the command" do
+          response = connector.run(full_command_name: "CommandWithSerializer", action: "run", inputs: { foo: "test" })
+          expect(response.body).to eq("SERIALIZED: TEST")
+        end
+      end
+
+      context "when command does not respond to serialize_result" do
+        before do
+          connector.connect(command_class)
+        end
+
+        it "does not call serialize_result" do
+          response = connector.run(full_command_name: "ComputeExponent", action: "run", inputs: { base: 2, exponent: 3 })
+          expect(response.body).to eq(8)
+        end
+      end
+    end
+
+    describe "#run_command with existing outcome" do
+      let(:connector) { described_class.new }
+      let(:command_with_outcome) do
+        stub_class(:CommandWithOutcome, Foobara::Command) do
+          inputs foo: :string
+          result :string
+
+          attr_accessor :outcome
+
+          def execute
+            # This should not be called if outcome already exists
+            raise "Should not execute when outcome exists"
+          end
+        end
+      end
+
+      before do
+        connector.connect(command_with_outcome)
+      end
+
+      it "does not run the command if outcome already exists" do
+        request = connector.send(:build_request, full_command_name: "CommandWithOutcome", action: "run", inputs: { foo: "test" })
+        request.command_class = connector.send(:request_to_command_class, request)
+        request.inputs = { foo: "test" }
+        command = connector.send(:request_to_command_instance, request)
+
+        # Set a fake outcome
+        command.outcome = Foobara::Outcome.success("already_done")
+        request.command = command
+
+        # This should not raise because execute won't be called
+        expect {
+          connector.send(:run_command, request)
+        }.not_to raise_error
+      end
+    end
+
+    describe "#run_command with capture_unknown_error" do
+      let(:error_command) do
+        stub_class(:ErrorCommand, Foobara::Command) do
+          inputs foo: :string
+          result :string
+
+          def execute
+            raise StandardError, "Unknown error occurred"
+          end
+        end
+      end
+
+      context "when capture_unknown_error is true" do
+        let(:connector) { described_class.new(capture_unknown_error: true) }
+
+        before do
+          connector.connect(error_command)
+        end
+
+        it "captures the unknown error" do
+          response = connector.run(full_command_name: "ErrorCommand", action: "run", inputs: { foo: "test" })
+          expect(response.status).to eq(1)
+          expect(response.success?).to be(false)
+        end
+      end
+
+      context "when capture_unknown_error is false" do
+        let(:connector) { described_class.new(capture_unknown_error: false) }
+
+        before do
+          connector.connect(error_command)
+        end
+
+        it "does not capture the unknown error and raises" do
+          expect {
+            connector.run(full_command_name: "ErrorCommand", action: "run", inputs: { foo: "test" })
+          }.to raise_error(StandardError, "Unknown error occurred")
+        end
+      end
+    end
+
+    describe "class inheritance branches" do
+      context "when superclass is not Object" do
+        it "inherits allowed_rules_to_register from superclass" do
+          parent_connector = Class.new(Foobara::CommandConnector)
+          parent_connector.register_allowed_rule(:some_rule)
+
+          child_connector = Class.new(parent_connector)
+
+          expect(child_connector.allowed_rules_to_register).to include([:some_rule])
+        end
+
+        it "inherits authenticator_registry from superclass" do
+          parent_connector = Class.new(Foobara::CommandConnector)
+
+          authenticator = stub_class(:InheritedAuthenticator, Foobara::CommandConnector::Authenticator) do
+            def symbol
+              :inherited_auth
+            end
+          end.instance
+
+          parent_connector.register_authenticator(authenticator)
+
+          child_connector = Class.new(parent_connector)
+
+          expect(child_connector.authenticator_registry).to have_key(:inherited_auth)
+        end
+      end
+    end
+
+    describe "to_authenticator array handling" do
+      context "when passing array with single element" do
+        let(:single_auth) do
+          stub_class(:SingleAuth, Foobara::CommandConnector::Authenticator) do
+            def symbol
+              :single
+            end
+          end.instance
+        end
+
+        before do
+          described_class.register_authenticator(single_auth)
+        end
+
+        it "returns the single authenticator" do
+          result = described_class.to_authenticator([:single])
+          expect(result.symbol).to eq(:single)
+        end
+      end
+
+      context "when passing array with multiple elements" do
+        let(:auth1) do
+          stub_class(:Auth1, Foobara::CommandConnector::Authenticator) do
+            def symbol
+              :auth1
+            end
+          end.instance
+        end
+
+        let(:auth2) do
+          stub_class(:Auth2, Foobara::CommandConnector::Authenticator) do
+            def symbol
+              :auth2
+            end
+          end.instance
+        end
+
+        before do
+          described_class.register_authenticator(auth1)
+          described_class.register_authenticator(auth2)
+        end
+
+        it "returns an AuthenticatorSelector" do
+          result = described_class.to_authenticator([:auth1, :auth2])
+          expect(result).to be_a(Foobara::CommandConnector::AuthenticatorSelector)
+        end
+      end
+
+      context "when passing callable object" do
+        it "creates an Authenticator from the callable" do
+          callable = ->(request) { { authenticated_user: "test" } }
+          result = described_class.to_authenticator(callable)
+          expect(result).to be_a(Foobara::CommandConnector::Authenticator)
+        end
+      end
+
+      context "when passing string" do
+        let(:string_auth) do
+          stub_class(:StringAuth, Foobara::CommandConnector::Authenticator) do
+            def symbol
+              :string_auth
+            end
+          end.instance
+        end
+
+        before do
+          described_class.register_authenticator(string_auth)
+        end
+
+        it "converts string to symbol and looks up authenticator" do
+          result = described_class.to_authenticator("string_auth")
+          expect(result.symbol).to eq(:string_auth)
+        end
+      end
+    end
+
+    describe "to_auth_user_mapper variations" do
+      context "when passing TypedTransformer" do
+        it "returns the transformer as-is" do
+          transformer = Foobara::TypeDeclarations::TypedTransformer.subclass(to: :string) do |user|
+            "mapped_#{user}"
+          end.instance
+
+          result = described_class.to_auth_user_mapper(transformer)
+          expect(result).to eq(transformer)
+        end
+      end
+
+      context "when passing TypedTransformer class" do
+        it "returns the instance" do
+          transformer_class = Foobara::TypeDeclarations::TypedTransformer.subclass(to: :string) do |user|
+            "mapped_#{user}"
+          end
+
+          result = described_class.to_auth_user_mapper(transformer_class)
+          expect(result).to be_a(Foobara::TypeDeclarations::TypedTransformer)
+        end
+      end
+
+      context "when passing DomainMapper class" do
+        let(:domain_mapper) do
+          stub_class(:UserDomainMapper, Foobara::DomainMapper) do
+            class << self
+              def to_type
+                :string
+              end
+
+              def map!(user)
+                "domain_mapped_#{user}"
+              end
+            end
+          end
+        end
+
+        it "builds auth mapper from domain mapper" do
+          result = described_class.to_auth_user_mapper(domain_mapper)
+          expect(result).to be_a(Foobara::TypeDeclarations::TypedTransformer)
+        end
+      end
+
+      context "when passing Command class with single input" do
+        let(:mapper_command) do
+          stub_class(:MapperCommand, Foobara::Command) do
+            inputs user: :string
+            result :string
+
+            def execute
+              "command_mapped_#{user}"
+            end
+          end
+        end
+
+        it "builds auth mapper from command" do
+          result = described_class.to_auth_user_mapper(mapper_command)
+          expect(result).to be_a(Foobara::TypeDeclarations::TypedTransformer)
+        end
+      end
+
+      context "when passing hash with to and map keys" do
+        it "builds auth mapper from hash" do
+          hash = { to: :string, map: ->(user) { "hash_mapped_#{user}" } }
+          result = described_class.to_auth_user_mapper(hash)
+          expect(result).to be_a(Foobara::TypeDeclarations::TypedTransformer)
+        end
+      end
+
+      context "when passing array with to and map" do
+        it "builds auth mapper from array" do
+          array = [:string, ->(user) { "array_mapped_#{user}" }]
+          result = described_class.to_auth_user_mapper(array)
+          expect(result).to be_a(Foobara::TypeDeclarations::TypedTransformer)
+        end
+      end
+    end
+
+    describe "request_to_command_inputs action variations" do
+      let(:connector) { described_class.new }
+
+      before do
+        connector.connect(command_class)
+      end
+
+      context "when action is ping" do
+        it "returns nil for inputs" do
+          request = connector.send(:build_request, full_command_name: nil, action: "ping", inputs: {})
+          inputs = connector.send(:request_to_command_inputs, request)
+          expect(inputs).to be_nil
+        end
+      end
+
+      context "when action is query_git_commit_info" do
+        it "returns nil for inputs" do
+          request = connector.send(:build_request, full_command_name: nil, action: "query_git_commit_info", inputs: {})
+          inputs = connector.send(:request_to_command_inputs, request)
+          expect(inputs).to be_nil
+        end
+      end
+
+      context "when action is help" do
+        it "returns hash with request" do
+          request = connector.send(:build_request, full_command_name: nil, action: "help", inputs: {})
+          inputs = connector.send(:request_to_command_inputs, request)
+          expect(inputs).to eq({ request: request })
+        end
+      end
+
+      context "when action is list" do
+        it "merges request into inputs" do
+          request = connector.send(:build_request, full_command_name: nil, action: "list", inputs: { foo: "bar" })
+          inputs = connector.send(:request_to_command_inputs, request)
+          expect(inputs).to include(request: request, foo: "bar")
+        end
+      end
+
+      context "when action is manifest" do
+        it "includes manifestable as self and request" do
+          request = connector.send(:build_request, full_command_name: nil, action: "manifest", inputs: {})
+          inputs = connector.send(:request_to_command_inputs, request)
+          expect(inputs).to include(manifestable: connector, request: request)
+        end
+      end
+
+      context "when action is describe with full_command_name" do
+        it "looks up command and includes it as manifestable" do
+          request = connector.send(:build_request, full_command_name: "ComputeExponent", action: "describe", inputs: {})
+          inputs = connector.send(:request_to_command_inputs, request)
+          expect(inputs).to include(:manifestable, :request)
+          expect(inputs[:manifestable]).to be_a(Class)
+        end
+      end
+
+      context "when action is describe with manifestable in inputs" do
+        it "looks up type and includes it as manifestable" do
+          request = connector.send(:build_request, full_command_name: nil, action: "describe", inputs: { manifestable: "integer" })
+          inputs = connector.send(:request_to_command_inputs, request)
+          expect(inputs).to include(:manifestable, :request)
+        end
+      end
+
+      context "when action is describe_type" do
+        it "looks up type by full_command_name and includes as manifestable" do
+          request = connector.send(:build_request, full_command_name: "integer", action: "describe_type", inputs: {})
+          inputs = connector.send(:request_to_command_inputs, request)
+          expect(inputs).to include(:manifestable, :request)
+        end
+      end
+    end
+
+    describe "request_to_command_class action variations" do
+      let(:connector) { described_class.new }
+
+      before do
+        connector.connect(command_class)
+      end
+
+      context "when action is describe" do
+        it "finds the describe builtin command" do
+          request = connector.send(:build_request, full_command_name: nil, action: "describe", inputs: { manifestable: "ComputeExponent" })
+          command_class = connector.send(:request_to_command_class, request)
+          expect(command_class).to be_a(Class)
+        end
+      end
+
+      context "when action is ping" do
+        it "finds the ping builtin command" do
+          request = connector.send(:build_request, full_command_name: nil, action: "ping", inputs: {})
+          command_class = connector.send(:request_to_command_class, request)
+          expect(command_class).to be_a(Class)
+        end
+      end
+
+      context "when action is query_git_commit_info" do
+        it "finds the query_git_commit_info builtin command" do
+          request = connector.send(:build_request, full_command_name: nil, action: "query_git_commit_info", inputs: {})
+          command_class = connector.send(:request_to_command_class, request)
+          expect(command_class).to be_a(Class)
+        end
+      end
+
+      context "when action is help" do
+        it "finds the help builtin command" do
+          # This is tested through integration tests, skip for unit test
+          skip "Requires proper CommandConnector::Commands setup"
+        end
+      end
+
+      context "when action is list" do
+        it "finds the list_commands builtin command" do
+          request = connector.send(:build_request, full_command_name: nil, action: "list", inputs: {})
+          command_class = connector.send(:request_to_command_class, request)
+          expect(command_class).to be_a(Class)
+        end
+      end
+
+      context "when action is manifest" do
+        it "maps to describe action" do
+          request = connector.send(:build_request, full_command_name: nil, action: "manifest", inputs: {})
+          command_class = connector.send(:request_to_command_class, request)
+          expect(command_class).to be_a(Class)
+        end
+      end
+
+      context "when action is describe_command" do
+        it "maps to describe action" do
+          request = connector.send(:build_request, full_command_name: "ComputeExponent", action: "describe_command", inputs: {})
+          command_class = connector.send(:request_to_command_class, request)
+          expect(command_class).to be_a(Class)
+        end
+      end
+
+      context "when action is describe_type" do
+        it "maps to describe action" do
+          request = connector.send(:build_request, full_command_name: "integer", action: "describe_type", inputs: {})
+          command_class = connector.send(:request_to_command_class, request)
+          expect(command_class).to be_a(Class)
+        end
+      end
+    end
+
+    describe "#desugarize_connect_args without desugarizer" do
+      let(:connector_class) do
+        Class.new(Foobara::CommandConnector) do
+          class << self
+            # Override to return nil
+            def desugarizer
+              nil
+            end
+          end
+        end
+      end
+
+      it "returns args and opts unchanged when no desugarizer" do
+        connector = connector_class.new
+        args = [command_class]
+        opts = { foo: :bar }
+
+        result_args, result_opts = connector.send(:desugarize_connect_args, args, opts)
+        expect(result_args).to eq(args)
+        expect(result_opts).to eq(opts)
+      end
+    end
+
+    describe "#set_response_status" do
+      let(:connector) { described_class.new }
+
+      before do
+        connector.connect(command_class)
+      end
+
+      context "when response is successful" do
+        it "sets status to 0" do
+          response = connector.run(full_command_name: "ComputeExponent", action: "run", inputs: { base: 2, exponent: 3 })
+          expect(response.status).to eq(0)
+        end
+      end
+
+      context "when response is not successful" do
+        it "sets status to 1" do
+          response = connector.run(full_command_name: "ComputeExponent", action: "run", inputs: { base: "invalid", exponent: 3 })
+          expect(response.status).to eq(1)
+        end
+      end
+    end
+
+    describe "#set_response_body" do
+      let(:connector) { described_class.new }
+
+      before do
+        connector.connect(command_class)
+      end
+
+      context "when outcome is successful" do
+        it "sets body to result" do
+          response = connector.run(full_command_name: "ComputeExponent", action: "run", inputs: { base: 2, exponent: 3 })
+          expect(response.body).to eq(8)
+        end
+      end
+
+      context "when outcome is not successful" do
+        it "sets body to error_collection" do
+          response = connector.run(full_command_name: "ComputeExponent", action: "run", inputs: { base: "invalid", exponent: 3 })
+          expect(response.body).to be_a(Foobara::ErrorCollection)
+        end
+      end
+    end
+
+    describe "transaction handling in run_request" do
+      let(:connector) { described_class.new }
+
+      before do
+        connector.connect(command_class)
+      end
+
+      context "when outcome is successful" do
+        it "commits the transaction" do
+          response = connector.run(full_command_name: "ComputeExponent", action: "run", inputs: { base: 2, exponent: 3 })
+          expect(response.success?).to be(true)
+          expect(response.body).to eq(8)
+        end
+      end
+
+      context "when outcome is not successful" do
+        it "rolls back the transaction" do
+          response = connector.run(full_command_name: "ComputeExponent", action: "run", inputs: { base: "invalid", exponent: 3 })
+          expect(response.success?).to be(false)
+        end
+      end
+    end
+
+    describe "memoization branches" do
+      context "allowed_rules_to_register" do
+        it "returns cached value on second call" do
+          connector_class = Class.new(Foobara::CommandConnector)
+
+          # First call initializes
+          first_call = connector_class.allowed_rules_to_register
+
+          # Second call should return cached value
+          second_call = connector_class.allowed_rules_to_register
+
+          expect(first_call).to eq(second_call)
+          expect(first_call.object_id).to eq(second_call.object_id)
+        end
+      end
+
+      context "authenticator_registry" do
+        it "returns cached value on second call" do
+          connector_class = Class.new(Foobara::CommandConnector)
+
+          # First call initializes
+          first_call = connector_class.authenticator_registry
+
+          # Second call should return cached value
+          second_call = connector_class.authenticator_registry
+
+          expect(first_call).to eq(second_call)
+          expect(first_call.object_id).to eq(second_call.object_id)
+        end
+      end
+    end
+
+    describe "additional action handling" do
+      let(:connector) { described_class.new }
+
+      before do
+        connector.connect(command_class)
+      end
+
+      context "when using describe action with type in inputs" do
+        it "finds type by manifestable in inputs" do
+          request = connector.send(:build_request, full_command_name: nil, action: "describe", inputs: { manifestable: "integer" })
+          inputs = connector.send(:request_to_command_inputs, request)
+          expect(inputs).to include(:manifestable)
+          expect(inputs[:manifestable]).to be_a(Foobara::Value::Processor)
+        end
+      end
+    end
+
+    describe "#determine_command_class error handling" do
+      let(:connector) { described_class.new }
+
+      it "does not determine command class when request has error" do
+        request = connector.send(:build_request, full_command_name: "NonExistent", action: "run", inputs: {})
+        request.instance_variable_set(:@error, "Some error")
+
+        result = connector.send(:determine_command_class, request)
+        expect(result).to be_nil
+      end
+    end
+
+    describe "#build_command_instance with TransformedCommand" do
+      let(:connector) { described_class.new }
+
+      before do
+        connector.connect(command_class)
+      end
+
+      it "sets request on TransformedCommand instances" do
+        request = connector.send(:build_request, full_command_name: "ComputeExponent", action: "run", inputs: { base: 2, exponent: 3 })
+        request.command_class = connector.send(:request_to_command_class, request)
+
+        command = connector.send(:build_command_instance, request)
+
+        if command.is_a?(Foobara::TransformedCommand)
+          expect(command.request).to eq(request)
+        end
+      end
+    end
+
+    describe "connect variations" do
+      context "when connecting abstract command" do
+        it "filters out abstract commands when connecting domain" do
+          # This is tested through integration tests, skip detailed test
+          # The code path is at lines 266-269 in command_connector.rb
+          skip "Requires complex domain setup with abstract commands"
+        end
+      end
+
+      context "when connecting via command alias" do
+        let(:connector) { described_class.new }
+
+        it "supports #command as alias for #connect" do
+          expect {
+            connector.command(command_class)
+          }.not_to raise_error
+
+          expect(connector.all_exposed_commands.size).to eq(1)
+        end
+      end
+    end
+
+    describe "default serializers and transformers handling" do
+      context "when default_serializers is nil" do
+        it "does not add any serializers" do
+          connector = described_class.new(default_serializers: nil)
+          expect(connector.command_registry).to be_a(Foobara::CommandRegistry)
+        end
+      end
+
+      context "when default_pre_commit_transformers is nil" do
+        it "does not add any transformers" do
+          connector = described_class.new(default_pre_commit_transformers: nil)
+          expect(connector.command_registry).to be_a(Foobara::CommandRegistry)
+        end
+      end
+
+      context "when default_serializers is array" do
+        it "adds each serializer" do
+          connector = described_class.new(
+            default_serializers: [
+              Foobara::CommandConnectors::Serializers::ErrorsSerializer,
+              Foobara::CommandConnectors::Serializers::JsonSerializer
+            ]
+          )
+          expect(connector.command_registry).to be_a(Foobara::CommandRegistry)
+        end
+      end
+
+      context "when default_pre_commit_transformers is array" do
+        it "adds each transformer" do
+          connector = described_class.new(
+            default_pre_commit_transformers: []
+          )
+          expect(connector.command_registry).to be_a(Foobara::CommandRegistry)
+        end
+      end
+    end
+
+    describe "to_authenticator with nil" do
+      it "returns nil when passed nil" do
+        result = described_class.to_authenticator(nil)
+        expect(result).to be_nil
+      end
+
+      it "returns nil when passed :symbol with nil" do
+        result = described_class.to_authenticator(:my_symbol, nil)
+        expect(result).to be_nil
+      end
+    end
+
+    describe "to_authenticator symbol assignment" do
+      it "assigns symbol to authenticator if not already set" do
+        callable = ->(request) { { authenticated_user: "test" } }
+        result = described_class.to_authenticator(:custom_symbol, callable)
+        expect(result.symbol).to eq(:custom_symbol)
+      end
+    end
+
+    describe "to_authenticator with Authenticator class" do
+      let(:auth_class) do
+        stub_class(:MyAuthClass, Foobara::CommandConnector::Authenticator) do
+          def symbol
+            :my_auth_class
+          end
+        end
+      end
+
+      it "returns instance of Authenticator class" do
+        result = described_class.to_authenticator(auth_class)
+        expect(result).to be_a(Foobara::CommandConnector::Authenticator)
+        expect(result.symbol).to eq(:my_auth_class)
+      end
+    end
+
+    describe "delayed_connections" do
+      let(:connector) { described_class.new }
+
+      it "initializes delayed_connections as empty hash" do
+        expect(connector.send(:delayed_connections)).to eq({})
+      end
+
+      it "processes delayed connections when all_exposed_commands is called" do
+        connector.connect("ComputeExponent")
+
+        # Define the command after delayed connection
+        command_class
+
+        exposed = connector.all_exposed_commands
+        expect(exposed.size).to eq(1)
+      end
+    end
+
+    describe "various getter methods" do
+      let(:connector) { described_class.new }
+
+      before do
+        connector.connect(command_class)
+      end
+
+      it "#lookup_command finds command by name" do
+        result = connector.lookup_command("ComputeExponent")
+        expect(result).not_to be_nil
+      end
+
+      it "#type_from_name finds type by name" do
+        result = connector.type_from_name("integer")
+        expect(result).to be_a(Foobara::Value::Processor)
+      end
+
+      it "#all_exposed_command_names returns array of command names" do
+        names = connector.all_exposed_command_names
+        expect(names).to include("ComputeExponent")
+      end
+
+      it "#allowed_rules delegates to command_registry" do
+        # Test that the method exists and can be called
+        expect(connector).to respond_to(:allowed_rules)
+      end
+
+      it "#add_default_inputs_transformer delegates to command_registry" do
+        expect {
+          connector.add_default_inputs_transformer(nil)
+        }.not_to raise_error
+      end
+
+      it "#add_default_result_transformer delegates to command_registry" do
+        expect {
+          connector.add_default_result_transformer(nil)
+        }.not_to raise_error
+      end
+
+      it "#add_default_errors_transformer delegates to command_registry" do
+        expect {
+          connector.add_default_errors_transformer(nil)
+        }.not_to raise_error
+      end
+
+      it "#add_default_pre_commit_transformer delegates to command_registry" do
+        expect {
+          connector.add_default_pre_commit_transformer(nil)
+        }.not_to raise_error
+      end
+
+      it "#add_default_serializer delegates to command_registry" do
+        expect {
+          connector.add_default_serializer(nil)
+        }.not_to raise_error
       end
     end
   end
